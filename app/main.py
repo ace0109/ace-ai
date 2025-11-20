@@ -8,6 +8,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel
 
 from app.rag import rag_service
+from app.admin import router as admin_router
 
 # --- 配置区域 ---
 MODEL_NAME = "qwen3-coder:30b"
@@ -35,6 +36,9 @@ def create_app() -> FastAPI:
     Build and return a FastAPI application instance.
     """
     app = FastAPI(title="Ace AI", version="0.1.0")
+    
+    # 注册 Admin Router
+    app.include_router(admin_router)
     
     @app.post("/ingest", summary="Add text to knowledge base")
     async def ingest_text(request: IngestRequest):

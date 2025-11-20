@@ -42,3 +42,6 @@ websockets==15.0.1
 zstandard==0.25.0
 langchain-community
 chromadb
+python-multipart
+pypdf
+langchain-chroma
