@@ -11,8 +11,9 @@ from app.rag import rag_service
 from app.admin import router as admin_router
 
 # --- 配置区域 ---
-MODEL_NAME = "qwen3-coder:30b"
+# MODEL_NAME = "qwen3-coder:30b"
 # MODEL_NAME = "deepseek-r1:8b"
+MODEL_NAME = "qwen3-coder:480b-cloud"
 SYSTEM_PROMPT = "用中文回复。结尾注明：-- 来自Ace AI"
 
 class MessageBody(BaseModel):
