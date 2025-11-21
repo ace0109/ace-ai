@@ -1,21 +1,46 @@
-"""
-Admin 模块：提供知识库管理接口
-支持上传 TXT/PDF/Markdown 文件，并提供 CRUD 操作
-"""
+"""API 模块：提供受保护的知识库管理与维护接口。"""
+
 import io
+import json
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from functools import lru_cache
+from typing import Any, AsyncIterator, List
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.responses import StreamingResponse
+from langchain_ollama import ChatOllama
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.rag import rag_service
+from app.core.auth import require_admin_key
+from app.services.key_store import key_store, Role
+from app.services.rag import get_rag_service
 
-# 创建路由
-router = APIRouter(prefix="/admin", tags=["Admin - 知识库管理"])
+router = APIRouter(
+    prefix="/api",
+    tags=["API"],
+)
+
+# --- 配置区域 ---
+# MODEL_NAME = "qwen3-coder:30b"
+# MODEL_NAME = "deepseek-r1:8b"
+MODEL_NAME = "qwen3-coder:480b-cloud"
+SYSTEM_PROMPT = "用中文回复。结尾注明：-- 来自Ace AI"
+
+
+class MessageBody(BaseModel):
+    message: str
+
+
+@lru_cache
+def get_llm() -> ChatOllama:
+    return ChatOllama(
+        model=MODEL_NAME,
+        temperature=0,
+        # keep_alive="5m", # 可选：保持模型加载状态
+    )
 
 # 配置文本分割器
 text_splitter = RecursiveCharacterTextSplitter(
@@ -25,6 +50,9 @@ text_splitter = RecursiveCharacterTextSplitter(
 )
 
 # --- Pydantic 模型 ---
+class IngestRequest(BaseModel):
+    text: str
+
 class DocumentResponse(BaseModel):
     id: str
     content: str
@@ -33,6 +61,17 @@ class DocumentResponse(BaseModel):
 class DocumentListResponse(BaseModel):
     total: int
     documents: List[DocumentResponse]
+
+
+class APIKeyCreateRequest(BaseModel):
+    role: Role
+    label: str | None = None
+
+class APIKeyCreateResponse(BaseModel):
+    api_key: str
+    role: Role
+    label: str | None
+    created_at: str
 
 
 # --- 辅助函数：文件解析 ---
@@ -59,6 +98,96 @@ def parse_markdown(content: bytes) -> str:
 
 
 # --- API 接口 ---
+
+@router.get("/health", summary="Health check")
+async def health():
+    """
+    健康检查接口
+    """
+    return {"status": "ok"}
+
+
+@router.post("/keys", response_model=APIKeyCreateResponse, summary="生成 API Key")
+async def create_api_key(payload: APIKeyCreateRequest, _: dict = Depends(require_admin_key)):
+    """
+    仅管理员可调用，生成新的 API Key；明文只在创建时返回一次。
+    """
+    created = key_store.create_key(role=payload.role, label=payload.label)
+    return APIKeyCreateResponse(**created)
+
+
+@router.get("/keys", summary="列出已存在的 API Key（隐藏明文）")
+async def list_api_keys(_: dict = Depends(require_admin_key)):
+    """
+    仅管理员可调用，用于查看已有 key 的角色、标签及创建时间。
+    """
+    return key_store.list_keys()
+
+
+@router.post("/chat", summary="Chat with Ollama")
+async def chat_with_ollama(
+    messageBody: MessageBody,
+    llm: ChatOllama = Depends(get_llm),
+):
+    """
+    进行聊天并使用 RAG 结果增强回答。
+    """
+    rag_service = get_rag_service()
+    relevant_docs = rag_service.query(messageBody.message, k=3)
+    context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
+
+    if context_text:
+        system_prompt_with_context = (
+            f"{SYSTEM_PROMPT}\n"
+            f"请基于以下【已知信息】回答用户的问题。如果无法从已知信息中得到答案，请如实说明。\n\n"
+            f"【已知信息】:\n{context_text}"
+        )
+    else:
+        system_prompt_with_context = SYSTEM_PROMPT
+
+    messages = [
+        ("system", system_prompt_with_context),
+        ("human", messageBody.message),
+    ]
+
+    async def stream_response() -> AsyncIterator[str]:
+        try:
+            async for chunk in llm.astream(messages):
+                if hasattr(chunk, "model_dump"):
+                    payload: Any = chunk.model_dump()
+                else:
+                    payload = {"content": str(chunk)}
+
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            error_payload = {"error": str(e), "content": f"\n[System Error]: {str(e)}"}
+            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+
+@router.post("/ingest", summary="Add text to knowledge base")
+async def ingest_text(request: IngestRequest):
+    """
+    接收文本并存入向量数据库
+    """
+    if not request.text.strip():
+        return {"status": "error", "message": "Text cannot be empty"}
+
+    rag_service = get_rag_service()
+    rag_service.add_documents([request.text])
+    return {"status": "success", "message": "Data ingested successfully"}
+
+
+@router.post("/reset", summary="Reset knowledge base")
+async def reset_knowledge_base():
+    """
+    清空知识库
+    """
+    rag_service = get_rag_service()
+    rag_service.reset()
+    return {"status": "success", "message": "Knowledge base reset successfully"}
+
 
 @router.post("/documents/upload", summary="上传文档到知识库")
 async def upload_document(file: UploadFile = File(...)):
@@ -121,6 +250,7 @@ async def upload_document(file: UploadFile = File(...)):
     
     # 6. 存入向量数据库
     try:
+        rag_service = get_rag_service()
         rag_service.add_documents(chunks, metadatas=metadatas, ids=chunk_ids)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"存储失败: {str(e)}")
@@ -141,6 +271,7 @@ async def list_documents(limit: int = 100, offset: int = 0):
     
     注意：每个文件可能被切分成多个 chunk，这里会返回所有 chunk
     """
+    rag_service = get_rag_service()
     data = rag_service.get_all_documents(limit=limit, offset=offset)
     
     documents = []
@@ -164,6 +295,7 @@ async def get_document(doc_id: str):
     """
     根据 ID 获取文档的完整内容
     """
+    rag_service = get_rag_service()
     doc = rag_service.get_document(doc_id)
     
     if not doc:
@@ -183,6 +315,7 @@ async def delete_document(doc_id: str):
     
     注意：如果文件被切分成多个 chunk，需要分别删除每个 chunk
     """
+    rag_service = get_rag_service()
     success = rag_service.delete_document(doc_id)
     
     if not success:
@@ -201,6 +334,7 @@ async def delete_documents_by_source(source: str):
     """
     # 1. 先查询匹配的文档数量（用于返回给前端）
     filter_dict = {"source": source}
+    rag_service = get_rag_service()
     docs = rag_service.get_documents_by_filter(filter_dict)
     count = len(docs["ids"]) if docs and "ids" in docs else 0
     
@@ -208,6 +342,7 @@ async def delete_documents_by_source(source: str):
         raise HTTPException(status_code=404, detail=f"未找到来源为 '{source}' 的文档")
     
     # 2. 批量删除
+    rag_service = get_rag_service()
     success = rag_service.delete_documents_by_filter(filter_dict)
     
     if not success:

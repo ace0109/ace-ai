@@ -28,3 +28,5 @@ dist/
 .history
 
 chroma_db/
+
+data/

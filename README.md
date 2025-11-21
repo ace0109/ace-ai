@@ -32,6 +32,24 @@ pip install -r requirements.lock
 ```
 > ⚠️ 在 Python 3.11/3.12 环境运行 `pip-compile`，以确保 `onnxruntime` 等依赖有可用的预编译包；3.13 上会因为缺少 wheel 直接失败。
 
+## 项目结构（核心）
+```
+app/
+  api/          # 业务接口路由
+    routes.py
+  core/         # 基础能力，如认证
+    auth.py
+  services/     # 服务层
+    rag.py
+  main.py       # FastAPI 入口
+```
+
+## API Key 认证
+- 首次启动时会自动生成一个超级管理员 API Key，写入 `data/initial_superadmin_key.txt`（仅生成一次），用于管理和生成后续的 Key。
+- 生成新的 API Key：使用超级管理员或管理员 Key 调用 `POST /api/keys`，传入 `{"role": "user" | "admin", "label": "可选备注"}`，响应会返回一次性的明文 `api_key`。
+- 查询已有 Key（不含明文）：`GET /api/keys`（需要管理员/超级管理员权限）。
+- 所有接口（包括 `/api/chat` 和其他 `/api/*`）均需在请求头携带 `X-API-Key: <有效密钥>` 进行认证。
+
 ## 运行
 
 ### Windows
@@ -46,7 +64,7 @@ source .venv/bin/activate
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-访问 `http://127.0.0.1:8000` 或 `http://127.0.0.1:8000/health`。
+访问时在请求头附带 `X-API-Key`，例如健康检查 `http://127.0.0.1:8000/api/health`、聊天接口 `http://127.0.0.1:8000/api/chat`。
 
 ## 测试
 
@@ -75,4 +93,4 @@ docker build -t fastapi-starter .
 # 运行容器
 docker run -d -p 8000:8000 --name fastapi-app fastapi-starter
 ```
-访问 `http://127.0.0.1:8000` 或 `/health`。`.dockerignore` 已排除 `.venv` 等本地文件，减少镜像上下文体积。
+访问时在请求头附带 `X-API-Key`，如 `/api/health`、`/api/chat`。`.dockerignore` 已排除 `.venv` 等本地文件，减少镜像上下文体积。

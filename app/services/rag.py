@@ -1,4 +1,4 @@
-import os
+from functools import lru_cache
 from typing import List, Dict, Optional
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
@@ -113,5 +113,9 @@ class RAGService:
             print(f"获取文档失败: {e}")
             return None
 
-# 创建全局单例实例
-rag_service = RAGService()
+@lru_cache
+def get_rag_service() -> RAGService:
+    """
+    延迟创建 RAGService，避免应用启动时阻塞（例如等待 Ollama 模型加载）。
+    """
+    return RAGService()
