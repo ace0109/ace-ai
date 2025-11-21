@@ -9,8 +9,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 拷贝代码
+# 拷贝代码（不带本地数据）
 COPY app app
+
+# 预创建运行时目录，避免容器内缺少 data/chroma_db 导致的写入问题
+RUN mkdir -p /app/data /app/chroma_db
 
 EXPOSE 8000
 

@@ -6,3 +6,5 @@ __pycache__/
 .git
 .gitignore
 tests/
+data/
+chroma_db/

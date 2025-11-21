@@ -90,7 +90,14 @@ pytest
 # 生成镜像
 docker build -t fastapi-starter .
 
-# 运行容器
-docker run -d -p 8000:8000 --name fastapi-app fastapi-starter
+# 运行容器（建议挂载运行时数据目录）
+docker run -d -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/chroma_db:/app/chroma_db \
+  --name fastapi-app fastapi-starter
 ```
-访问时在请求头附带 `X-API-Key`，如 `/api/health`、`/api/chat`。`.dockerignore` 已排除 `.venv` 等本地文件，减少镜像上下文体积。
+说明：
+- 默认镜像内会在 `/app/data` 存放 API Key 数据库（`api_keys.db`）及初始超管 Key 文件（首次写入），`/app/chroma_db` 存放向量库，建议挂载为本地目录以持久化。
+- 如需自定义挂载路径，替换 `-v` 参数即可；若容器以非 root 运行，请确保挂载目录具备写权限。
+
+访问时在请求头附带 `X-API-Key`，如 `/api/health`、`/api/chat`。`.dockerignore` 已排除 `.venv`、`data/`、`chroma_db/` 等本地文件，减少镜像上下文体积。
