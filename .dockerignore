@@ -1,10 +1,37 @@
-.venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Git
 .git
 .gitignore
-tests/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Environment Variables (Security)
+.env
+.env.*
+
+# Local Data & Logs
 data/
 chroma_db/
+logs/
+*.log
+.history/
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/
+
+# Docker related (not needed inside image)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Tests & Docs
+tests/
+README.md
