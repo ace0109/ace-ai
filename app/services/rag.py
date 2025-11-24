@@ -4,9 +4,11 @@ from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
+from app.core.config import settings
+
 # --- 配置 ---
-EMBEDDING_MODEL = "nomic-embed-text"
-VECTOR_STORE_PATH = "./chroma_db"
+EMBEDDING_MODEL = settings.EMBEDDING_MODEL
+VECTOR_STORE_PATH = settings.VECTOR_STORE_PATH
 
 class RAGService:
     def __init__(self):

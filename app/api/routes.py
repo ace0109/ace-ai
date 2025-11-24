@@ -1,6 +1,5 @@
 """API 模块：提供受保护的知识库管理与维护接口。"""
 
-import io
 import json
 import uuid
 from datetime import datetime
@@ -8,15 +7,17 @@ from functools import lru_cache
 from typing import Any, AsyncIterator, List
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from langchain_ollama import ChatOllama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
-from pypdf import PdfReader
 
 from app.core.auth import require_admin_key
+from app.core.config import settings
 from app.services.key_store import key_store, Role
 from app.services.rag import get_rag_service
+from app.utils.file_parsers import parse_file_content
 
 router = APIRouter(
     prefix="/api",
@@ -24,11 +25,7 @@ router = APIRouter(
 )
 
 # --- 配置区域 ---
-# MODEL_NAME = "qwen3-coder:30b"
-# MODEL_NAME = "deepseek-r1:8b"
-MODEL_NAME = "qwen3-coder:480b-cloud"
-SYSTEM_PROMPT = "用中文回复。结尾注明：-- 来自Ace AI"
-
+# Config handled by settings
 
 class MessageBody(BaseModel):
     message: str
@@ -37,15 +34,15 @@ class MessageBody(BaseModel):
 @lru_cache
 def get_llm() -> ChatOllama:
     return ChatOllama(
-        model=MODEL_NAME,
+        model=settings.MODEL_NAME,
         temperature=0,
         # keep_alive="5m", # 可选：保持模型加载状态
     )
 
 # 配置文本分割器
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,  # 每个块的字符数
-    chunk_overlap=200,  # 块之间的重叠字符数
+    chunk_size=settings.CHUNK_SIZE,
+    chunk_overlap=settings.CHUNK_OVERLAP,
     separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
 )
 
@@ -75,26 +72,7 @@ class APIKeyCreateResponse(BaseModel):
 
 
 # --- 辅助函数：文件解析 ---
-def parse_txt(content: bytes) -> str:
-    """解析 TXT 文件"""
-    try:
-        return content.decode('utf-8')
-    except UnicodeDecodeError:
-        # 尝试其他编码
-        return content.decode('gbk', errors='ignore')
-
-def parse_pdf(content: bytes) -> str:
-    """解析 PDF 文件"""
-    pdf_file = io.BytesIO(content)
-    reader = PdfReader(pdf_file)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() + "\n"
-    return text
-
-def parse_markdown(content: bytes) -> str:
-    """解析 Markdown 文件（与 TXT 类似）"""
-    return parse_txt(content)
+# Moved to app.utils.file_parsers
 
 
 # --- API 接口 ---
@@ -133,17 +111,17 @@ async def chat_with_ollama(
     进行聊天并使用 RAG 结果增强回答。
     """
     rag_service = get_rag_service()
-    relevant_docs = rag_service.query(messageBody.message, k=3)
+    relevant_docs = await run_in_threadpool(rag_service.query, messageBody.message, k=3)
     context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
 
     if context_text:
         system_prompt_with_context = (
-            f"{SYSTEM_PROMPT}\n"
+            f"{settings.SYSTEM_PROMPT}\n"
             f"请基于以下【已知信息】回答用户的问题。如果无法从已知信息中得到答案，请如实说明。\n\n"
             f"【已知信息】:\n{context_text}"
         )
     else:
-        system_prompt_with_context = SYSTEM_PROMPT
+        system_prompt_with_context = settings.SYSTEM_PROMPT
 
     messages = [
         ("system", system_prompt_with_context),
@@ -175,7 +153,7 @@ async def ingest_text(request: IngestRequest):
         return {"status": "error", "message": "Text cannot be empty"}
 
     rag_service = get_rag_service()
-    rag_service.add_documents([request.text])
+    await run_in_threadpool(rag_service.add_documents, [request.text])
     return {"status": "success", "message": "Data ingested successfully"}
 
 
@@ -185,7 +163,7 @@ async def reset_knowledge_base():
     清空知识库
     """
     rag_service = get_rag_service()
-    rag_service.reset()
+    await run_in_threadpool(rag_service.reset)
     return {"status": "success", "message": "Knowledge base reset successfully"}
 
 
@@ -214,12 +192,7 @@ async def upload_document(file: UploadFile = File(...)):
     
     # 3. 根据文件类型解析
     try:
-        if file_ext == '.pdf':
-            text = parse_pdf(content)
-        elif file_ext in ['.md', '.markdown']:
-            text = parse_markdown(content)
-        else:  # .txt
-            text = parse_txt(content)
+        text = parse_file_content(content, file_ext)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"文件解析失败: {str(e)}")
     
@@ -251,7 +224,7 @@ async def upload_document(file: UploadFile = File(...)):
     # 6. 存入向量数据库
     try:
         rag_service = get_rag_service()
-        rag_service.add_documents(chunks, metadatas=metadatas, ids=chunk_ids)
+        await run_in_threadpool(rag_service.add_documents, chunks, metadatas=metadatas, ids=chunk_ids)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"存储失败: {str(e)}")
     
@@ -272,7 +245,7 @@ async def list_documents(limit: int = 100, offset: int = 0):
     注意：每个文件可能被切分成多个 chunk，这里会返回所有 chunk
     """
     rag_service = get_rag_service()
-    data = rag_service.get_all_documents(limit=limit, offset=offset)
+    data = await run_in_threadpool(rag_service.get_all_documents, limit=limit, offset=offset)
     
     documents = []
     if data["ids"]:
@@ -296,7 +269,7 @@ async def get_document(doc_id: str):
     根据 ID 获取文档的完整内容
     """
     rag_service = get_rag_service()
-    doc = rag_service.get_document(doc_id)
+    doc = await run_in_threadpool(rag_service.get_document, doc_id)
     
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -316,7 +289,7 @@ async def delete_document(doc_id: str):
     注意：如果文件被切分成多个 chunk，需要分别删除每个 chunk
     """
     rag_service = get_rag_service()
-    success = rag_service.delete_document(doc_id)
+    success = await run_in_threadpool(rag_service.delete_document, doc_id)
     
     if not success:
         raise HTTPException(status_code=404, detail="文档不存在或删除失败")
@@ -335,7 +308,7 @@ async def delete_documents_by_source(source: str):
     # 1. 先查询匹配的文档数量（用于返回给前端）
     filter_dict = {"source": source}
     rag_service = get_rag_service()
-    docs = rag_service.get_documents_by_filter(filter_dict)
+    docs = await run_in_threadpool(rag_service.get_documents_by_filter, filter_dict)
     count = len(docs["ids"]) if docs and "ids" in docs else 0
     
     if count == 0:
@@ -343,7 +316,7 @@ async def delete_documents_by_source(source: str):
     
     # 2. 批量删除
     rag_service = get_rag_service()
-    success = rag_service.delete_documents_by_filter(filter_dict)
+    success = await run_in_threadpool(rag_service.delete_documents_by_filter, filter_dict)
     
     if not success:
         raise HTTPException(status_code=500, detail="删除失败")
