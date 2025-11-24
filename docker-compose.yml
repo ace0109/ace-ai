@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    image: ace-ai:latest
+    container_name: ace-ai
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+    environment:
+      # 如果有环境变量可以在这里配置，例如：
+      # - OPENAI_API_KEY=your_key_here
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
