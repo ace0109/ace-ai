@@ -13,6 +13,7 @@ def get_llm() -> ChatOllama:
     return ChatOllama(
         model=settings.MODEL_NAME,
         temperature=0,
+        base_url=settings.OLLAMA_BASE_URL,
     )
 
 

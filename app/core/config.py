@@ -17,6 +17,7 @@ class Settings:
     # 默认使用 qwen3-coder:480b-cloud，也可通过环境变量覆盖
     MODEL_NAME: str = os.getenv("MODEL_NAME", "qwen3-coder:480b-cloud")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+    OLLAMA_BASE_URL: Optional[str] = os.getenv("OLLAMA_BASE_URL", None)
     
     # RAG
     VECTOR_STORE_PATH: str = os.getenv("VECTOR_STORE_PATH", "./chroma_db")

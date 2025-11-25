@@ -9,7 +9,8 @@ services:
       - ./data:/app/data
       - ./chroma_db:/app/chroma_db
     environment:
-      # 如果有环境变量可以在这里配置，例如：
-      # - OPENAI_API_KEY=your_key_here
       - TZ=Asia/Shanghai
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux 支持
     restart: unless-stopped

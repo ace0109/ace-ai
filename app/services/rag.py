@@ -14,7 +14,10 @@ VECTOR_STORE_PATH = settings.VECTOR_STORE_PATH
 class RAGService:
     def __init__(self):
         # 初始化 Embedding 模型
-        self.embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+        self.embeddings = OllamaEmbeddings(
+            model=EMBEDDING_MODEL,
+            base_url=settings.OLLAMA_BASE_URL,
+        )
 
         # 初始化向量数据库 (Chroma)
         # persist_directory 指定数据保存的本地路径
