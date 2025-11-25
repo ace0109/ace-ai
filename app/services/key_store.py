@@ -7,10 +7,17 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Literal
+from typing import Optional, Dict, Literal, TypedDict
 
 
 Role = Literal["user", "admin", "super_admin"]
+
+
+class APIKeyCreateResult(TypedDict):
+    api_key: str
+    role: Role
+    label: str
+    created_at: str
 
 
 class APIKeyStore:
@@ -41,7 +48,7 @@ class APIKeyStore:
     def _hash_key(raw_key: str) -> str:
         return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
-    def create_key(self, role: Role, label: Optional[str] = None) -> Dict[str, str]:
+    def create_key(self, role: Role, label: Optional[str] = None) -> APIKeyCreateResult:
         """
         生成随机 API Key，存储哈希，返回明文 key 及基础信息。
         """

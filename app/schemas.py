@@ -1,5 +1,5 @@
-from typing import Generic, TypeVar, Optional, List
-from pydantic import BaseModel
+from typing import Generic, TypeVar, Optional, List, get_args
+from pydantic import BaseModel, field_validator
 from app.services.key_store import Role
 
 T = TypeVar("T")
@@ -42,6 +42,15 @@ class DocumentListResponse(BaseModel):
 class APIKeyCreateRequest(BaseModel):
     role: Role
     label: str | None = None
+
+    @field_validator('role')
+    @classmethod
+    def validate_role(cls, v: str) -> Role:
+        """验证并转换 role 为正确的 Literal 类型"""
+        allowed_roles = get_args(Role)
+        if v not in allowed_roles:
+            raise ValueError(f"role must be one of {allowed_roles}")
+        return v  # type: ignore
 
 class APIKeyCreateResponse(BaseModel):
     api_key: str

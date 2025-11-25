@@ -1,8 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import routes
-from app.api.routes import get_llm
+from app.api.routes import chat, documents
+from app.api.deps import get_llm
 from app.main import app
 from app.services.key_store import key_store
 
@@ -92,7 +92,9 @@ def fake_rag_service():
 
 @pytest.fixture
 def client(fake_rag_service, monkeypatch):
-    monkeypatch.setattr(routes, "get_rag_service", lambda: fake_rag_service)
+    # Patch get_rag_service in both chat and documents modules
+    monkeypatch.setattr(chat, "get_rag_service", lambda: fake_rag_service)
+    monkeypatch.setattr(documents, "get_rag_service", lambda: fake_rag_service)
     app.dependency_overrides[get_llm] = lambda: FakeLLM()
 
     test_client = TestClient(app)
