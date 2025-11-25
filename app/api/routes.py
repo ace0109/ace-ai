@@ -4,20 +4,32 @@ import json
 import uuid
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, AsyncIterator, List
+from typing import Any, AsyncIterator, List, Optional, Dict
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from langchain_ollama import ChatOllama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 
-from app.core.auth import require_admin_key
+from app.core.auth import require_admin_key, require_api_key
 from app.core.config import settings
 from app.services.key_store import key_store, Role
 from app.services.rag import get_rag_service
+from app.services.chat_store import chat_store
 from app.utils.file_parsers import parse_file_content
+from app.schemas import (
+    UnifiedResponse,
+    MessageBody,
+    SessionResponse,
+    MessageResponse,
+    IngestRequest,
+    DocumentResponse,
+    DocumentListResponse,
+    APIKeyCreateRequest,
+    APIKeyCreateResponse
+)
 
 router = APIRouter(
     prefix="/api",
@@ -26,10 +38,6 @@ router = APIRouter(
 
 # --- 配置区域 ---
 # Config handled by settings
-
-class MessageBody(BaseModel):
-    message: str
-
 
 @lru_cache
 def get_llm() -> ChatOllama:
@@ -46,30 +54,6 @@ text_splitter = RecursiveCharacterTextSplitter(
     separators=["\n\n", "\n", "。", "！", "？", ".", "!", "?", " ", ""]
 )
 
-# --- Pydantic 模型 ---
-class IngestRequest(BaseModel):
-    text: str
-
-class DocumentResponse(BaseModel):
-    id: str
-    content: str
-    metadata: dict
-
-class DocumentListResponse(BaseModel):
-    total: int
-    documents: List[DocumentResponse]
-
-
-class APIKeyCreateRequest(BaseModel):
-    role: Role
-    label: str | None = None
-
-class APIKeyCreateResponse(BaseModel):
-    api_key: str
-    role: Role
-    label: str | None
-    created_at: str
-
 
 # --- 辅助函数：文件解析 ---
 # Moved to app.utils.file_parsers
@@ -77,66 +61,123 @@ class APIKeyCreateResponse(BaseModel):
 
 # --- API 接口 ---
 
-@router.get("/health", summary="Health check")
+@router.get("/health", summary="Health check", response_model=UnifiedResponse[Dict[str, str]])
 async def health():
     """
     健康检查接口
     """
-    return {"status": "ok"}
+    return UnifiedResponse(data={"status": "ok"})
 
 
-@router.post("/keys", response_model=APIKeyCreateResponse, summary="生成 API Key")
+@router.post("/keys", response_model=UnifiedResponse[APIKeyCreateResponse], summary="生成 API Key")
 async def create_api_key(payload: APIKeyCreateRequest, _: dict = Depends(require_admin_key)):
     """
     仅管理员可调用，生成新的 API Key；明文只在创建时返回一次。
     """
     created = key_store.create_key(role=payload.role, label=payload.label)
-    return APIKeyCreateResponse(**created)
+    return UnifiedResponse(data=APIKeyCreateResponse(**created))
 
 
-@router.get("/keys", summary="列出已存在的 API Key（隐藏明文）")
+@router.get("/keys", summary="列出已存在的 API Key（隐藏明文）", response_model=UnifiedResponse[Dict[str, list]])
 async def list_api_keys(_: dict = Depends(require_admin_key)):
     """
     仅管理员可调用，用于查看已有 key 的角色、标签及创建时间。
     """
-    return key_store.list_keys()
+    return UnifiedResponse(data=key_store.list_keys())
+
+
+# --- Chat Session Endpoints ---
+
+@router.get("/chat/sessions", response_model=UnifiedResponse[List[SessionResponse]], summary="获取会话列表")
+async def list_chat_sessions(api_key_record: dict = Depends(require_api_key)):
+    sessions = await run_in_threadpool(chat_store.list_sessions, api_key_record["id"])
+    return UnifiedResponse(data=sessions)
+
+
+@router.delete("/chat/sessions/{session_id}", summary="删除会话", response_model=UnifiedResponse[Dict[str, str]])
+async def delete_chat_session(session_id: str, api_key_record: dict = Depends(require_api_key)):
+    success = await run_in_threadpool(chat_store.delete_session, session_id, api_key_record["id"])
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return UnifiedResponse(data={"status": "success"})
+
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=UnifiedResponse[List[MessageResponse]], summary="获取会话消息记录")
+async def get_chat_messages(session_id: str, api_key_record: dict = Depends(require_api_key)):
+    # Verify ownership
+    session = await run_in_threadpool(chat_store.get_session, session_id, api_key_record["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    messages = await run_in_threadpool(chat_store.get_messages, session_id)
+    return UnifiedResponse(data=messages)
 
 
 @router.post("/chat", summary="Chat with Ollama")
 async def chat_with_ollama(
     messageBody: MessageBody,
     llm: ChatOllama = Depends(get_llm),
+    api_key_record: dict = Depends(require_api_key),
 ):
     """
     进行聊天并使用 RAG 结果增强回答。
     """
+    # 1. Handle Session
+    session_id = messageBody.session_id
+    if not session_id:
+        # Create new session
+        session = await run_in_threadpool(chat_store.create_session, api_key_record["id"], name=messageBody.message[:20])
+        session_id = session["id"]
+    else:
+        # Verify session exists and belongs to user
+        session = await run_in_threadpool(chat_store.get_session, session_id, api_key_record["id"])
+        if not session:
+             raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2. Save User Message
+    await run_in_threadpool(chat_store.add_message, session_id, "user", messageBody.message)
+
+    # 3. Get History & RAG
+    history = await run_in_threadpool(chat_store.get_messages, session_id)
+    # Filter last N messages to avoid context overflow? For now, take last 10.
+    recent_history = history[-10:] 
+    
     rag_service = get_rag_service()
     relevant_docs = await run_in_threadpool(rag_service.query, messageBody.message, k=3)
     context_text = "\n\n".join([doc.page_content for doc in relevant_docs])
 
+    system_prompt = settings.SYSTEM_PROMPT
     if context_text:
-        system_prompt_with_context = (
-            f"{settings.SYSTEM_PROMPT}\n"
-            f"请基于以下【已知信息】回答用户的问题。如果无法从已知信息中得到答案，请如实说明。\n\n"
+        system_prompt += (
+            f"\n\n请基于以下【已知信息】回答用户的问题。如果无法从已知信息中得到答案，请如实说明。\n\n"
             f"【已知信息】:\n{context_text}"
         )
-    else:
-        system_prompt_with_context = settings.SYSTEM_PROMPT
-
-    messages = [
-        ("system", system_prompt_with_context),
-        ("human", messageBody.message),
-    ]
+    
+    messages = [("system", system_prompt)]
+    for msg in recent_history:
+        role = "human" if msg['role'] == "user" else "ai"
+        messages.append((role, msg['content']))
 
     async def stream_response() -> AsyncIterator[str]:
+        full_response = ""
+        # Yield session_id first so client knows it
+        yield f"data: {json.dumps({'session_id': session_id}, ensure_ascii=False)}\n\n"
+        
         try:
             async for chunk in llm.astream(messages):
+                content = ""
                 if hasattr(chunk, "model_dump"):
                     payload: Any = chunk.model_dump()
+                    content = payload.get("content", "")
                 else:
-                    payload = {"content": str(chunk)}
+                    content = str(chunk)
+                    payload = {"content": content}
 
+                full_response += content
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            
+            # Save Assistant Message after streaming is done
+            await run_in_threadpool(chat_store.add_message, session_id, "assistant", full_response)
+            
         except Exception as e:
             error_payload = {"error": str(e), "content": f"\n[System Error]: {str(e)}"}
             yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
@@ -144,30 +185,30 @@ async def chat_with_ollama(
     return StreamingResponse(stream_response(), media_type="text/event-stream")
 
 
-@router.post("/ingest", summary="Add text to knowledge base")
+@router.post("/ingest", summary="Add text to knowledge base", response_model=UnifiedResponse[Dict[str, str]])
 async def ingest_text(request: IngestRequest):
     """
     接收文本并存入向量数据库
     """
     if not request.text.strip():
-        return {"status": "error", "message": "Text cannot be empty"}
+        return UnifiedResponse(code="400", message="Text cannot be empty", data={"status": "error"})
 
     rag_service = get_rag_service()
     await run_in_threadpool(rag_service.add_documents, [request.text])
-    return {"status": "success", "message": "Data ingested successfully"}
+    return UnifiedResponse(data={"status": "success", "message": "Data ingested successfully"})
 
 
-@router.post("/reset", summary="Reset knowledge base")
+@router.post("/reset", summary="Reset knowledge base", response_model=UnifiedResponse[Dict[str, str]])
 async def reset_knowledge_base():
     """
     清空知识库
     """
     rag_service = get_rag_service()
     await run_in_threadpool(rag_service.reset)
-    return {"status": "success", "message": "Knowledge base reset successfully"}
+    return UnifiedResponse(data={"status": "success", "message": "Knowledge base reset successfully"})
 
 
-@router.post("/documents/upload", summary="上传文档到知识库")
+@router.post("/documents/upload", summary="上传文档到知识库", response_model=UnifiedResponse[Dict[str, Any]])
 async def upload_document(file: UploadFile = File(...)):
     """
     上传文件（支持 .txt, .pdf, .md）
@@ -228,16 +269,16 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"存储失败: {str(e)}")
     
-    return {
+    return UnifiedResponse(data={
         "status": "success",
         "message": f"文件 '{filename}' 上传成功",
         "filename": filename,
         "chunks_created": len(chunks),
         "base_id": base_id
-    }
+    })
 
 
-@router.get("/documents", response_model=DocumentListResponse, summary="列出所有文档")
+@router.get("/documents", response_model=UnifiedResponse[DocumentListResponse], summary="列出所有文档")
 async def list_documents(limit: int = 100, offset: int = 0):
     """
     获取知识库中的所有文档 (支持分页)
@@ -260,10 +301,10 @@ async def list_documents(limit: int = 100, offset: int = 0):
                 metadata=data["metadatas"][i] if (data["metadatas"] and data["metadatas"][i] is not None) else {}
             ))
     
-    return DocumentListResponse(total=len(documents), documents=documents)
+    return UnifiedResponse(data=DocumentListResponse(total=len(documents), documents=documents))
 
 
-@router.get("/documents/{doc_id}", response_model=DocumentResponse, summary="获取单个文档详情")
+@router.get("/documents/{doc_id}", response_model=UnifiedResponse[DocumentResponse], summary="获取单个文档详情")
 async def get_document(doc_id: str):
     """
     根据 ID 获取文档的完整内容
@@ -274,14 +315,14 @@ async def get_document(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
     
-    return DocumentResponse(
+    return UnifiedResponse(data=DocumentResponse(
         id=doc["id"],
         content=doc["content"],
         metadata=doc["metadata"]
-    )
+    ))
 
 
-@router.delete("/documents/{doc_id}", summary="删除文档")
+@router.delete("/documents/{doc_id}", summary="删除文档", response_model=UnifiedResponse[Dict[str, str]])
 async def delete_document(doc_id: str):
     """
     根据 ID 删除文档
@@ -294,10 +335,10 @@ async def delete_document(doc_id: str):
     if not success:
         raise HTTPException(status_code=404, detail="文档不存在或删除失败")
     
-    return {"status": "success", "message": f"文档 {doc_id} 已删除"}
+    return UnifiedResponse(data={"status": "success", "message": f"文档 {doc_id} 已删除"})
 
 
-@router.delete("/documents/batch/by-source", summary="批量删除文档（按文件名）")
+@router.delete("/documents/batch/by-source", summary="批量删除文档（按文件名）", response_model=UnifiedResponse[Dict[str, Any]])
 async def delete_documents_by_source(source: str):
     """
     删除指定文件名的所有 chunk
@@ -321,9 +362,9 @@ async def delete_documents_by_source(source: str):
     if not success:
         raise HTTPException(status_code=500, detail="删除失败")
     
-    return {
+    return UnifiedResponse(data={
         "status": "success",
         "message": f"已删除 {count} 个文档块",
         "source": source,
         "deleted_count": count
-    }
+    })
