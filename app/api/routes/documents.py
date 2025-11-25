@@ -29,7 +29,11 @@ async def ingest_text(request: IngestRequest):
         return UnifiedResponse(code="400", message="Text cannot be empty", data={"status": "error"})
 
     rag_service = get_rag_service()
-    await run_in_threadpool(rag_service.add_documents, [request.text])
+    metadata = {
+        "source": request.source or "manual_input",
+        "upload_time": datetime.now().isoformat(),
+    }
+    await run_in_threadpool(rag_service.add_documents, [request.text], metadatas=[metadata])
     return UnifiedResponse(data={"status": "success", "message": "Data ingested successfully"})
 
 

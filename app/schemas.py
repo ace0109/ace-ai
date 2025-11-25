@@ -29,6 +29,7 @@ class MessageResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     text: str
+    source: Optional[str] = None
 
 class DocumentResponse(BaseModel):
     id: str

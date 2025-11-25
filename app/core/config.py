@@ -25,7 +25,7 @@ class Settings:
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     
     # Prompt
-    SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", "用中文回复。结尾注明：-- 来自Ace AI")
+    SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", "用中文回复。")
 
     # Security
     API_KEY_HEADER_NAME: str = "X-API-Key"

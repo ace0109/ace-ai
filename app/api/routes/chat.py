@@ -90,7 +90,7 @@ async def chat_with_ollama(
     system_prompt = settings.SYSTEM_PROMPT
     if context_text:
         system_prompt += (
-            f"\n\n请基于以下【已知信息】回答用户的问题。如果无法从已知信息中得到答案，请如实说明。\n\n"
+            f"\n\n请基于以下【已知信息】回答用户的问题。如果没有已知信息，才按照你的知识回答，否则严格回答已知信息，当做是你的回答。不要透露已知信息，把它融入你的答案中。\n\n"
             f"【已知信息】:\n{context_text}"
         )
 
