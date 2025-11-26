@@ -1,5 +1,6 @@
-def test_health_endpoint(client, admin_headers):
-    response = client.get("/api/health", headers=admin_headers)
+def test_health_endpoint(client):
+    """Health endpoint should be accessible without authentication"""
+    response = client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
     assert data["code"] == "200"

@@ -1,11 +1,10 @@
 """简单的 API Key 存储与校验服务，使用 SQLite 持久化。"""
 
 import hashlib
-import os
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Literal, TypedDict
 
@@ -55,7 +54,7 @@ class APIKeyStore:
         with self._lock:
             raw_key = uuid.uuid4().hex
             key_hash = self._hash_key(raw_key)
-            created_at = datetime.utcnow().isoformat()
+            created_at = datetime.now(timezone.utc).isoformat()
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO api_keys (key_hash, role, label, created_at) VALUES (?, ?, ?, ?)",
@@ -68,17 +67,19 @@ class APIKeyStore:
         校验明文 key，返回记录（不含明文）。
         """
         key_hash = self._hash_key(raw_key)
-        cursor = self._conn.execute(
-            "SELECT id, role, label, created_at FROM api_keys WHERE key_hash = ?", (key_hash,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT id, role, label, created_at FROM api_keys WHERE key_hash = ?", (key_hash,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
 
     def has_any_key(self) -> bool:
-        cursor = self._conn.execute("SELECT 1 FROM api_keys LIMIT 1")
-        return cursor.fetchone() is not None
+        with self._lock:
+            cursor = self._conn.execute("SELECT 1 FROM api_keys LIMIT 1")
+            return cursor.fetchone() is not None
 
     def get_or_create_super_admin(self) -> Optional[str]:
         """
@@ -92,11 +93,12 @@ class APIKeyStore:
             return created["api_key"]
 
     def list_keys(self) -> Dict[str, list]:
-        cursor = self._conn.execute(
-            "SELECT id, role, label, created_at FROM api_keys ORDER BY created_at DESC"
-        )
-        rows = [dict(row) for row in cursor.fetchall()]
-        return {"items": rows}
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT id, role, label, created_at FROM api_keys ORDER BY created_at DESC"
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            return {"items": rows}
 
 
 # 创建全局实例，并在无 super_admin 时自动生成一个

@@ -41,6 +41,9 @@ class FakeRAGService:
     def reset(self):
         self.docs.clear()
 
+    def count_documents(self) -> int:
+        return len(self.docs)
+
     def query(self, query_text: str, k: int = 3):
         items = list(self.docs.items())[:k]
         return [FakeDocument(payload["content"], payload["metadata"]) for _, payload in items]
@@ -110,6 +113,12 @@ def admin_api_key():
 
 
 @pytest.fixture
+def super_admin_api_key():
+    created = key_store.create_key("super_admin", label="pytest-super-admin")
+    return created["api_key"]
+
+
+@pytest.fixture
 def user_api_key():
     created = key_store.create_key("user", label="pytest-user")
     return created["api_key"]
@@ -118,6 +127,11 @@ def user_api_key():
 @pytest.fixture
 def admin_headers(admin_api_key):
     return {"X-API-Key": admin_api_key}
+
+
+@pytest.fixture
+def super_admin_headers(super_admin_api_key):
+    return {"X-API-Key": super_admin_api_key}
 
 
 @pytest.fixture

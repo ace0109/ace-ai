@@ -1,7 +1,7 @@
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -12,6 +12,8 @@ class ChatStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # 启用外键约束，确保 ON DELETE CASCADE 生效
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._setup()
 
     def _setup(self) -> None:
@@ -43,7 +45,7 @@ class ChatStore:
     def create_session(self, api_key_id: int, name: Optional[str] = None) -> Dict:
         with self._lock:
             session_id = str(uuid.uuid4())
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             if not name:
                 name = f"Session {now}"
             
@@ -61,19 +63,21 @@ class ChatStore:
             }
 
     def get_session(self, session_id: str, api_key_id: int) -> Optional[Dict]:
-        cursor = self._conn.execute(
-            "SELECT * FROM chat_sessions WHERE id = ? AND api_key_id = ?",
-            (session_id, api_key_id)
-        )
-        row = cursor.fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM chat_sessions WHERE id = ? AND api_key_id = ?",
+                (session_id, api_key_id)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def list_sessions(self, api_key_id: int) -> List[Dict]:
-        cursor = self._conn.execute(
-            "SELECT * FROM chat_sessions WHERE api_key_id = ? ORDER BY updated_at DESC",
-            (api_key_id,)
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM chat_sessions WHERE api_key_id = ? ORDER BY updated_at DESC",
+                (api_key_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def delete_session(self, session_id: str, api_key_id: int) -> bool:
         with self._lock:
@@ -86,7 +90,7 @@ class ChatStore:
 
     def add_message(self, session_id: str, role: str, content: str) -> Dict:
         with self._lock:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             with self._conn:
                 cursor = self._conn.execute(
                     "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -108,10 +112,11 @@ class ChatStore:
             }
 
     def get_messages(self, session_id: str) -> List[Dict]:
-        cursor = self._conn.execute(
-            "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
-            (session_id,)
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
 chat_store = ChatStore()

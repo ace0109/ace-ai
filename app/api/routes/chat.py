@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from langchain_ollama import ChatOllama
 
 from app.api.deps import get_llm
-from app.core.auth import require_api_key
+from app.core.auth import get_current_api_key
 from app.core.config import settings
 from app.services.chat_store import chat_store
 from app.services.rag import get_rag_service
@@ -21,17 +21,18 @@ from app.schemas import (
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+# 注意：API Key 认证已在 api/__init__.py 的路由注册时配置
 
 
 @router.get("/sessions", response_model=UnifiedResponse[List[SessionResponse]], summary="获取会话列表")
-async def list_chat_sessions(api_key_record: dict = Depends(require_api_key)):
+async def list_chat_sessions(api_key_record: dict = Depends(get_current_api_key)):
     """获取当前用户的所有聊天会话"""
     sessions = await run_in_threadpool(chat_store.list_sessions, api_key_record["id"])
     return UnifiedResponse(data=sessions)
 
 
 @router.delete("/sessions/{session_id}", summary="删除会话", response_model=UnifiedResponse[Dict[str, str]])
-async def delete_chat_session(session_id: str, api_key_record: dict = Depends(require_api_key)):
+async def delete_chat_session(session_id: str, api_key_record: dict = Depends(get_current_api_key)):
     """删除指定的聊天会话"""
     success = await run_in_threadpool(chat_store.delete_session, session_id, api_key_record["id"])
     if not success:
@@ -40,7 +41,7 @@ async def delete_chat_session(session_id: str, api_key_record: dict = Depends(re
 
 
 @router.get("/sessions/{session_id}/messages", response_model=UnifiedResponse[List[MessageResponse]], summary="获取会话消息记录")
-async def get_chat_messages(session_id: str, api_key_record: dict = Depends(require_api_key)):
+async def get_chat_messages(session_id: str, api_key_record: dict = Depends(get_current_api_key)):
     """获取指定会话的所有消息记录"""
     # Verify ownership
     session = await run_in_threadpool(chat_store.get_session, session_id, api_key_record["id"])
@@ -54,7 +55,7 @@ async def get_chat_messages(session_id: str, api_key_record: dict = Depends(requ
 async def chat_with_ollama(
     messageBody: MessageBody,
     llm: ChatOllama = Depends(get_llm),
-    api_key_record: dict = Depends(require_api_key),
+    api_key_record: dict = Depends(get_current_api_key),
 ):
     """
     进行聊天并使用 RAG 结果增强回答。
@@ -117,11 +118,13 @@ async def chat_with_ollama(
                 full_response += content
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            # Save Assistant Message after streaming is done
-            await run_in_threadpool(chat_store.add_message, session_id, "assistant", full_response)
-
         except Exception as e:
             error_payload = {"error": str(e), "content": f"\n[System Error]: {str(e)}"}
             yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+
+        finally:
+            # Save Assistant Message even if connection is dropped or error occurs
+            if full_response:
+                await run_in_threadpool(chat_store.add_message, session_id, "assistant", full_response)
 
     return StreamingResponse(stream_response(), media_type="text/event-stream")

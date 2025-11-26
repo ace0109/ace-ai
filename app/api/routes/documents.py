@@ -1,12 +1,13 @@
 """文档和知识库管理接口"""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from app.api.deps import text_splitter
+from app.core.auth import require_super_admin_key
 from app.services.rag import get_rag_service
 from app.utils.file_parsers import parse_file_content
 from app.schemas import (
@@ -18,6 +19,7 @@ from app.schemas import (
 
 
 router = APIRouter(tags=["Documents"])
+# 注意：API Key 认证已在 api/__init__.py 的路由注册时配置
 
 
 @router.post("/ingest", summary="Add text to knowledge base", response_model=UnifiedResponse[Dict[str, str]])
@@ -31,16 +33,16 @@ async def ingest_text(request: IngestRequest):
     rag_service = get_rag_service()
     metadata = {
         "source": request.source or "manual_input",
-        "upload_time": datetime.now().isoformat(),
+        "upload_time": datetime.now(timezone.utc).isoformat(),
     }
     await run_in_threadpool(rag_service.add_documents, [request.text], metadatas=[metadata])
     return UnifiedResponse(data={"status": "success", "message": "Data ingested successfully"})
 
 
 @router.post("/reset", summary="Reset knowledge base", response_model=UnifiedResponse[Dict[str, str]])
-async def reset_knowledge_base():
+async def reset_knowledge_base(_: dict = Depends(require_super_admin_key)):
     """
-    清空知识库
+    清空知识库（仅超级管理员可操作）
     """
     rag_service = get_rag_service()
     await run_in_threadpool(rag_service.reset)
@@ -68,7 +70,17 @@ async def upload_document(file: UploadFile = File(...)):
         )
 
     # 2. 读取文件内容
+    # 增加大小限制 (例如 10MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+
+    # 检查 Content-Length 头（如果存在）
+    if file.size and file.size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件过大，最大允许 10MB")
+
     content = await file.read()
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件过大，最大允许 10MB")
 
     # 3. 根据文件类型解析
     try:
@@ -82,6 +94,10 @@ async def upload_document(file: UploadFile = File(...)):
     # 4. 文本分割
     chunks = text_splitter.split_text(text)
 
+    # 检查是否有有效的 chunk
+    if not chunks:
+        raise HTTPException(status_code=400, detail="文件内容过短，无法生成有效的文档块")
+
     # 5. 生成唯一的文档 ID
     # 使用 UUID 避免文件名中的特殊字符导致 ID 问题，同时保留文件名在 metadata 中
     base_id = str(uuid.uuid4())
@@ -92,7 +108,7 @@ async def upload_document(file: UploadFile = File(...)):
     metadatas = [
         {
             "source": filename,
-            "upload_time": datetime.now().isoformat(),
+            "upload_time": datetime.now(timezone.utc).isoformat(),
             "file_type": file_ext,
             "chunk_index": i,
             "total_chunks": len(chunks),
@@ -127,6 +143,11 @@ async def list_documents(limit: int = 100, offset: int = 0):
     注意：每个文件可能被切分成多个 chunk，这里会返回所有 chunk
     """
     rag_service = get_rag_service()
+    
+    # 获取文档总数（用于分页）
+    total = await run_in_threadpool(rag_service.count_documents)
+    
+    # 获取当前页的文档
     data = await run_in_threadpool(rag_service.get_all_documents, limit=limit, offset=offset)
 
     documents = []
@@ -144,7 +165,7 @@ async def list_documents(limit: int = 100, offset: int = 0):
                 )
             )
 
-    return UnifiedResponse(data=DocumentListResponse(total=len(documents), documents=documents))
+    return UnifiedResponse(data=DocumentListResponse(total=total, documents=documents))
 
 
 @router.get("/documents/{doc_id}", response_model=UnifiedResponse[DocumentResponse], summary="获取单个文档详情")
@@ -178,9 +199,9 @@ async def delete_document(doc_id: str):
 
 
 @router.delete("/documents/batch/by-source", summary="批量删除文档（按文件名）", response_model=UnifiedResponse[Dict[str, Any]])
-async def delete_documents_by_source(source: str):
+async def delete_documents_by_source(source: str, _: dict = Depends(require_super_admin_key)):
     """
-    删除指定文件名的所有 chunk
+    删除指定文件名的所有 chunk（仅超级管理员可操作）
 
     参数:
         source: 文件名（例如 "manual.pdf"）
@@ -195,7 +216,6 @@ async def delete_documents_by_source(source: str):
         raise HTTPException(status_code=404, detail=f"未找到来源为 '{source}' 的文档")
 
     # 2. 批量删除
-    rag_service = get_rag_service()
     success = await run_in_threadpool(rag_service.delete_documents_by_filter, filter_dict)
 
     if not success:

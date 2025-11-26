@@ -1,7 +1,6 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 
 from app.api import router as api_router
-from app.core.auth import require_api_key
 
 
 def create_app() -> FastAPI:
@@ -11,10 +10,10 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Ace AI",
         version="0.1.0",
-        dependencies=[Depends(require_api_key)],
+        # 权限控制已在 api router 中按路由分别配置
     )
     
-    # 注册受保护的 API Router
+    # 注册 API Router（各路由自行管理权限）
     app.include_router(api_router)
     
     return app
